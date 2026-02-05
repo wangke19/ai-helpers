@@ -141,34 +141,53 @@ Use the "Download and Validate prowjob.json" steps from "Prow Job Analyze Resour
 
 3. **Detect must-gather archive** (only if --fast not present)
 
-   Use TEST_NAME (not TARGET) for artifact paths:
+   Use TEST_NAME (not TARGET) for artifact paths.
 
-   Check for single must-gather (standard OpenShift):
+   **Standard OpenShift**: Check for gather-must-gather archive
    ```bash
-   gcloud storage ls gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-must-gather/artifacts/must-gather.tar
+   STANDARD_MG_PATH=$(gcloud storage ls "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-must-gather/artifacts/must-gather.tar" 2>/dev/null || true)
    ```
 
-   Check for dual must-gather (HyperShift):
+   **HyperShift**: Check for dump-management-cluster archive (contains both mgmt + hosted cluster)
    ```bash
-   # Management cluster must-gather
-   MGMT_MG_PATH=$(gcloud storage ls "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-must-gather/artifacts/must-gather.tar" 2>/dev/null || true)
+   # HyperShift uses dump-management-cluster, and the archive may be .tar or .tar.gz
+   HYPERSHIFT_DUMP_PATH=$(gcloud storage ls "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/dump-management-cluster/artifacts/artifacts.tar*" 2>/dev/null | head -1 || true)
+   ```
 
-   # Hosted cluster must-gather (requires extra token between gather- and -must-gather)
-   # Pattern: gather-*-must-gather (e.g., gather-clusters-default-must-gather)
-   HOSTED_MG_PATH=$(gcloud storage ls "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-*-must-gather/artifacts/must-gather.tar" 2>/dev/null | grep -v 'gather-must-gather' || true)
+   **Determine archive type**:
+   ```bash
+   if [ -n "$HYPERSHIFT_DUMP_PATH" ]; then
+     # HyperShift dump found - check if it contains hosted cluster data
+     IS_HYPERSHIFT=true
+     ARCHIVE_TYPE="hypershift"
 
-   # Validate HOSTED_MG_PATH is distinct from management path
-   if [ -n "$HOSTED_MG_PATH" ] && [ "$HOSTED_MG_PATH" = "$MGMT_MG_PATH" ]; then
-       HOSTED_MG_PATH=""  # Not a dual setup, clear the hosted path
+     # Download temporarily to check for hosted cluster data
+     TMP_CHECK="/tmp/check-hypershift-$$.tar"
+     gcloud storage cp "$HYPERSHIFT_DUMP_PATH" "$TMP_CHECK" --no-user-output-enabled
+
+     # Check if archive contains hostedcluster-* directory
+     HAS_HOSTED_CLUSTER=$(tar -tf "$TMP_CHECK" 2>/dev/null | grep -q "hostedcluster-" && echo "true" || echo "false")
+     rm -f "$TMP_CHECK"
+   elif [ -n "$STANDARD_MG_PATH" ]; then
+     # Standard OpenShift must-gather found
+     IS_HYPERSHIFT=false
+     ARCHIVE_TYPE="standard"
+     HAS_HOSTED_CLUSTER=false
+   else
+     # No must-gather found
+     ARCHIVE_TYPE="none"
    fi
    ```
 
    Possible outcomes:
-   - **No must-gather found**: Skip to Step 5 (silent, expected for some jobs)
-   - **Single must-gather found** (MGMT_MG_PATH set, HOSTED_MG_PATH empty): Standard OpenShift cluster
-   - **Two distinct must-gather archives found** (both MGMT_MG_PATH and HOSTED_MG_PATH set): HyperShift (management + hosted cluster)
+   - **ARCHIVE_TYPE="none"**: No must-gather found → Skip to Step 5 (silent, expected for some jobs)
+   - **ARCHIVE_TYPE="standard"**: Standard OpenShift cluster → Extract single must-gather
+   - **ARCHIVE_TYPE="hypershift" + HAS_HOSTED_CLUSTER=false**: HyperShift management cluster only → Extract management data
+   - **ARCHIVE_TYPE="hypershift" + HAS_HOSTED_CLUSTER=true**: HyperShift dual cluster → Extract both management and hosted cluster data
 
-   **Important**: Always validate HOSTED_MG_PATH is non-empty before using it downstream to avoid treating single cluster as dual.
+   **Important**: HyperShift archives contain BOTH management and hosted cluster data in a SINGLE file with structure:
+   - Management: `logs/artifacts/output/` (root level)
+   - Hosted: `logs/artifacts/output/hostedcluster-{name}/` (subdirectory)
 
 4. **Ask user if they want must-gather analysis**
    - Only if must-gather(s) were found and --fast not present
@@ -220,13 +239,15 @@ Only if user chose "Yes" in Step 4.5:
 
 3. **Create must-gather directories**
 
-   For single must-gather:
+   Based on ARCHIVE_TYPE from Step 4.5.3:
+
+   For standard OpenShift (ARCHIVE_TYPE="standard"):
    ```bash
    mkdir -p .work/prow-job-analyze-test-failure/{build_id}/must-gather/logs
    mkdir -p .work/prow-job-analyze-test-failure/{build_id}/must-gather/tmp
    ```
 
-   For dual must-gather (HyperShift):
+   For HyperShift (ARCHIVE_TYPE="hypershift"):
    ```bash
    mkdir -p .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs
    mkdir -p .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp
@@ -238,63 +259,78 @@ Only if user chose "Yes" in Step 4.5:
 
    Use TEST_NAME (from Step 4.5.2) for artifact paths, not {target}:
 
-   For single must-gather:
+   For standard OpenShift (ARCHIVE_TYPE="standard"):
    ```bash
-   gcloud storage cp "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-must-gather/artifacts/must-gather.tar" \
+   gcloud storage cp "$STANDARD_MG_PATH" \
      .work/prow-job-analyze-test-failure/{build_id}/must-gather/tmp/must-gather.tar \
      --no-user-output-enabled
    ```
 
-   For dual must-gather (HyperShift):
+   For HyperShift (ARCHIVE_TYPE="hypershift"):
    ```bash
-   # Management cluster must-gather
-   gcloud storage cp "gs://test-platform-results/{bucket-path}/artifacts/$TEST_NAME/gather-must-gather/artifacts/must-gather.tar" \
-     .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/must-gather.tar \
+   # Download unified archive (contains both management and hosted cluster data)
+   gcloud storage cp "$HYPERSHIFT_DUMP_PATH" \
+     .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/hypershift-dump.tar \
      --no-user-output-enabled
-
-   # Hosted cluster must-gather (HOSTED_MG_PATH was set in Step 4.5.3)
-   # The path was already resolved in detection step, so use it directly
-   # Note: HOSTED_MG_PATH is already the full gs:// URL from the detection step
-
-   # Only download if HOSTED_MG_PATH is set (dual must-gather setup)
-   if [ -n "$HOSTED_MG_PATH" ]; then
-       gcloud storage cp "$HOSTED_MG_PATH" \
-         .work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/tmp/must-gather.tar \
-         --no-user-output-enabled
-
-       # Extract namespace from path (e.g., gather-clusters-default-must-gather → default)
-       HOSTED_NAMESPACE=$(echo "$HOSTED_MG_PATH" | sed -n 's/.*gather-clusters-\([^-]*\)-must-gather.*/\1/p')
-       echo "Hosted cluster namespace: $HOSTED_NAMESPACE"
-   else
-       echo "No hosted cluster must-gather found (single cluster setup)"
-   fi
    ```
 
-5. **Extract archives using existing script**
+5. **Extract archives**
 
-   For single must-gather:
+   For standard OpenShift (ARCHIVE_TYPE="standard"):
    ```bash
+   # Use existing extract_archives.py script for standard must-gather
    python3 plugins/prow-job/skills/prow-job-extract-must-gather/extract_archives.py \
      .work/prow-job-analyze-test-failure/{build_id}/must-gather/tmp/must-gather.tar \
      .work/prow-job-analyze-test-failure/{build_id}/must-gather/logs
    ```
 
-   For dual must-gather (HyperShift):
+   For HyperShift (ARCHIVE_TYPE="hypershift"):
    ```bash
-   # Extract management cluster
-   python3 plugins/prow-job/skills/prow-job-extract-must-gather/extract_archives.py \
-     .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/must-gather.tar \
-     .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs
+   # Extract unified archive to temporary location
+   TMP_EXTRACT=".work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/extracted"
+   mkdir -p "$TMP_EXTRACT"
 
-   # Extract hosted cluster
-   python3 plugins/prow-job/skills/prow-job-extract-must-gather/extract_archives.py \
-     .work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/tmp/must-gather.tar \
-     .work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs
+   # Handle both .tar and .tar.gz
+   if [[ "$HYPERSHIFT_DUMP_PATH" == *.tar.gz ]]; then
+     tar -xzf .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/hypershift-dump.tar -C "$TMP_EXTRACT"
+   else
+     tar -xf .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/tmp/hypershift-dump.tar -C "$TMP_EXTRACT"
+   fi
+
+   # Find the output directory (may be at logs/artifacts/output or just output)
+   OUTPUT_DIR=$(find "$TMP_EXTRACT" -type d -name "output" | head -1)
+
+   if [ -z "$OUTPUT_DIR" ]; then
+     echo "ERROR: Could not find output directory in HyperShift dump"
+     # Skip to Step 5
+   fi
+
+   # Move management cluster data (root level in output/)
+   # Exclude hostedcluster-* directories
+   for item in "$OUTPUT_DIR"/*; do
+     if [ -e "$item" ] && [[ ! "$(basename "$item")" =~ ^hostedcluster- ]]; then
+       mv "$item" .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs/
+     fi
+   done
+
+   # Move hosted cluster data (hostedcluster-* subdirectory)
+   if [ "$HAS_HOSTED_CLUSTER" = "true" ]; then
+     HOSTED_DIR=$(find "$OUTPUT_DIR" -maxdepth 1 -type d -name "hostedcluster-*" | head -1)
+     if [ -n "$HOSTED_DIR" ]; then
+       mv "$HOSTED_DIR"/* .work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs/
+       echo "✓ Hosted cluster data extracted"
+     else
+       echo "WARNING: Expected hosted cluster data but hostedcluster-* directory not found"
+     fi
+   fi
+
+   # Cleanup temporary extraction directory
+   rm -rf "$TMP_EXTRACT"
    ```
 
 6. **Locate and validate content directories**
 
-   For single must-gather:
+   For standard OpenShift (ARCHIVE_TYPE="standard"):
    ```bash
    # Check for content/ directory first (renamed by extraction script)
    if [ -d ".work/prow-job-analyze-test-failure/{build_id}/must-gather/logs/content" ]; then
@@ -317,28 +353,37 @@ Only if user chose "Yes" in Step 4.5:
    fi
    ```
 
-   For dual must-gather (HyperShift):
+
+   For HyperShift (ARCHIVE_TYPE="hypershift"):
    ```bash
-   # Management cluster
-   if [ -d ".work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs/content" ]; then
-       MUST_GATHER_MGMT_PATH=".work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs/content"
-   else
-       MUST_GATHER_MGMT_PATH=$(find .work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs -maxdepth 1 -type d -name "*-ci-*" | head -1)
-   fi
+   # Management cluster - data was extracted directly to logs/ directory
+   MUST_GATHER_MGMT_PATH=".work/prow-job-analyze-test-failure/{build_id}/must-gather-mgmt/logs"
 
-   # Hosted cluster
-   if [ -d ".work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs/content" ]; then
-       MUST_GATHER_HOSTED_PATH=".work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs/content"
-   else
-       MUST_GATHER_HOSTED_PATH=$(find .work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs -maxdepth 1 -type d -name "*-ci-*" | head -1)
-   fi
-
-   # Validate both paths
-   if [ -z "$MUST_GATHER_MGMT_PATH" ] || [ ! -d "$MUST_GATHER_MGMT_PATH" ]; then
-       echo "ERROR: Management cluster must-gather content directory not found"
-       # Fall back to single cluster analysis if only one succeeds
+   # Validate management cluster path
+   if [ ! -d "$MUST_GATHER_MGMT_PATH" ]; then
+       echo "ERROR: Management cluster directory not found"
+       # Skip to Step 5 (continue with test-level analysis only)
    elif [ -z "$(ls -A "$MUST_GATHER_MGMT_PATH" 2>/dev/null)" ]; then
-       echo "ERROR: Management cluster must-gather content directory is empty"
+       echo "ERROR: Management cluster directory is empty"
+       # Skip to Step 5 (continue with test-level analysis only)
+   else
+       echo "✓ Management cluster data located at: $MUST_GATHER_MGMT_PATH"
+   fi
+
+   # Hosted cluster - only if HAS_HOSTED_CLUSTER is true
+   if [ "$HAS_HOSTED_CLUSTER" = "true" ]; then
+       MUST_GATHER_HOSTED_PATH=".work/prow-job-analyze-test-failure/{build_id}/must-gather-hosted/logs"
+
+       # Validate hosted cluster path
+       if [ ! -d "$MUST_GATHER_HOSTED_PATH" ]; then
+           echo "WARNING: Hosted cluster directory not found (expected based on archive detection)"
+           MUST_GATHER_HOSTED_PATH=""  # Clear the path
+       elif [ -z "$(ls -A "$MUST_GATHER_HOSTED_PATH" 2>/dev/null)" ]; then
+           echo "WARNING: Hosted cluster directory is empty"
+           MUST_GATHER_HOSTED_PATH=""  # Clear the path
+       else
+           echo "✓ Hosted cluster data located at: $MUST_GATHER_HOSTED_PATH"
+       fi
    else
        echo "✓ Management cluster must-gather located at: $MUST_GATHER_MGMT_PATH"
    fi

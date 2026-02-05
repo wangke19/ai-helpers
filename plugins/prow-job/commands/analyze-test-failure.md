@@ -44,11 +44,16 @@ The command provides comprehensive analysis by:
 ### HyperShift Support
 
 For HyperShift jobs with hosted clusters, the command automatically:
-- Detects dual must-gather archives (management + hosted cluster)
-- Extracts and analyzes both clusters separately
-- Identifies hosted cluster namespace from must-gather path
+- Detects HyperShift dump archives (`dump-management-cluster/artifacts/artifacts.tar`)
+- Extracts unified archive containing both management and hosted cluster data
+- Splits data into separate directories for independent analysis
+- Detects hosted cluster data within the archive (hostedcluster-* directory)
 - Provides separate diagnostic sections for each cluster
 - Correlates issues across both clusters in root cause analysis
+
+**Note**: HyperShift jobs use a different artifact structure than standard OpenShift jobs:
+- Standard OpenShift: `gather-must-gather/artifacts/must-gather.tar` (single cluster)
+- HyperShift: `dump-management-cluster/artifacts/artifacts.tar` (unified mgmt + hosted)
 
 ## Implementation
 Pass the user's request to the skill, which will:
