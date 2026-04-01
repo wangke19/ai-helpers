@@ -329,6 +329,54 @@ The CI system may attach **symptom labels** to job runs — machine-detected pat
 
 4. **Use symptoms as investigative context** — symptoms are environmental observations, NOT definitive causes. They should inform your investigation (e.g., if 2 tests failed while high CPU was measured, CPU pressure could explain the failures if no other cause is found) but you must still perform thorough root cause analysis. Include them in the "Known Symptoms Seen" section of the report.
 
+### Step 4.3c: Detect Disruption-Heavy Failures
+
+If interval files were downloaded in Step 4.3, scan them for disruption events to determine if this is a disruption-driven failure that warrants deeper disruption analysis.
+
+1. **Count disruption events during test execution window**
+
+   Parse the downloaded interval files and count items where:
+   - `source = "Disruption"`
+   - `level = "Error"` or `level = "Warning"`
+   - `from` and `to` timestamps overlap with the test execution window (identified in Step 4.3)
+
+   Also extract:
+   - Which backends were disrupted (from `locator.keys.backend-disruption-name`)
+   - Disruption timing relative to test failure
+   - Any source-node patterns (from `locator.keys.disruption` field for host-to-host backends)
+
+2. **Assess disruption significance**
+
+   Determine if disruption is a primary factor in the failure:
+
+   - **5+ disruption events during test window** → Disruption-heavy failure
+   - **Disruption events immediately before test failure (±30 seconds)** → Likely causal
+   - **Disruption in API backends** (`kube-api`, `openshift-api`, `oauth-api`) → High impact
+   - **Disruption in test-specific backends** (e.g., `ingress-to-oauth-server` for auth tests) → Directly related
+
+3. **Suggest follow-up analysis when appropriate**
+
+   If disruption is significant (5+ events, or API backend disruption, or timing correlation):
+
+   - Include a **"Disruption Analysis Recommended"** section in the final report (Step 5)
+   - Note the disruption count, affected backends, and timing
+   - Recommend: "This failure shows significant disruption activity. For deeper disruption root cause analysis (backend classification, source-node patterns, cross-run comparison), run: `/ci:analyze-disruption <job-url>`"
+
+   **When NOT to suggest disruption analysis**:
+   - 0-2 disruption events during test window (noise level)
+   - Disruption only in unrelated backends
+   - Disruption occurred long before/after the test failure (>5 minutes)
+   - Test failure has clear non-disruption root cause (e.g., assertion failure, panic in test code)
+
+4. **Include disruption context in root cause determination (Step 4.9)**
+
+   When disruption is detected:
+   - Mention disruption timing and backends in the root cause hypothesis
+   - Note whether disruption appears to be a symptom or a cause
+   - If disruption preceded the failure, investigate what triggered the disruption (resource pressure, node issues, etc.)
+
+**Note**: This detection is a lightweight check using the already-downloaded interval files. The `/ci:analyze-disruption` skill provides comprehensive disruption-specific analysis with dedicated parsing, backend classification, multi-run comparison, and source-node fan-out detection — use it when disruption is a significant factor.
+
 ### Step 4.4: Gather initial evidence
 
 - Analyze stack traces from build-log.txt
@@ -918,6 +966,7 @@ Synthesize all gathered evidence to determine the most likely root cause for the
    - Test code analysis from Step 4.4
    - Interval file events from Step 4.3
    - Known symptom labels from Step 4.3b (if available — use as supporting context, not as root cause)
+   - Disruption detection from Step 4.3c (if significant disruption was detected)
    - Cluster diagnostics from Step 4.7 (if available)
    - Correlations from Step 4.8 (if available)
 
@@ -966,6 +1015,29 @@ Synthesize all gathered evidence to determine the most likely root cause for the
    *(Only if symptom labels were found in Step 4.3b — omit section entirely if none)*
    - {symptom summary}: {symptom explanation}
    > **Note**: Symptoms are machine-detected environmental observations, not definitive causes. They add context to help explain failures when correlated with other evidence.
+
+   ## Disruption Analysis Recommended
+   *(Only include this section if Step 4.3c detected significant disruption — omit entirely otherwise)*
+
+   This failure shows significant disruption activity during the test execution window:
+   - **Disruption event count**: {count} events
+   - **Affected backends**: {backend-1}, {backend-2}, ...
+   - **Timing**: Disruption occurred {timing-description relative to test failure}
+
+   **Recommendation**: For comprehensive disruption root cause analysis including backend classification, source-node fan-out detection, and cross-run pattern comparison, run:
+   ```
+   /ci:analyze-disruption {job-url}
+   ```
+
+   The `/ci:analyze-disruption` skill provides:
+   - Backend type classification (cache vs non-cache, API vs non-API, cloud canaries)
+   - Source-node pattern detection (single-source fan-out vs multi-source)
+   - Correlation with OVS stalls, CPU pressure, etcd delays, and disk I/O metrics
+   - Multi-run comparison to identify systemic vs intermittent patterns
+
+   > **Note**: Continue reading below for test-level analysis. Disruption analysis complements this report by explaining *why* the cluster experienced connectivity issues.
+
+   ---
 
    ## Test Failure Analysis
 
@@ -1047,6 +1119,29 @@ Synthesize all gathered evidence to determine the most likely root cause for the
    *(Only if symptom labels were found in Step 4.3b — omit section entirely if none)*
    - {symptom summary}: {symptom explanation}
    > **Note**: Symptoms are machine-detected environmental observations, not definitive causes. They add context to help explain failures when correlated with other evidence.
+
+   ## Disruption Analysis Recommended
+   *(Only include this section if Step 4.3c detected significant disruption — omit entirely otherwise)*
+
+   This failure shows significant disruption activity during the test execution window:
+   - **Disruption event count**: {count} events
+   - **Affected backends**: {backend-1}, {backend-2}, ...
+   - **Timing**: Disruption occurred {timing-description relative to test failure}
+
+   **Recommendation**: For comprehensive disruption root cause analysis including backend classification, source-node fan-out detection, and cross-run pattern comparison, run:
+   ```
+   /ci:analyze-disruption {job-url}
+   ```
+
+   The `/ci:analyze-disruption` skill provides:
+   - Backend type classification (cache vs non-cache, API vs non-API, cloud canaries)
+   - Source-node pattern detection (single-source fan-out vs multi-source)
+   - Correlation with OVS stalls, CPU pressure, etcd delays, and disk I/O metrics
+   - Multi-run comparison to identify systemic vs intermittent patterns
+
+   > **Note**: Continue reading below for test-level analysis. Disruption analysis complements this report by explaining *why* the cluster experienced connectivity issues.
+
+   ---
 
    ## Test Failure Analysis
 
@@ -1165,6 +1260,27 @@ Synthesize all gathered evidence to determine the most likely root cause for the
    *(Only if symptom labels were found in Step 4.3b — omit section entirely if none)*
    - {symptom summary}: {symptom explanation}
    > **Note**: Symptoms are machine-detected environmental observations, not definitive causes.
+
+   ## Disruption Analysis Recommended
+   *(Only include this section if Step 4.3c detected significant disruption — omit entirely otherwise)*
+
+   This failure shows significant disruption activity during the test execution window:
+   - **Disruption event count**: {count} events
+   - **Affected backends**: {backend-1}, {backend-2}, ...
+   - **Timing**: Disruption occurred {timing-description relative to test failure}
+
+   **Recommendation**: For comprehensive disruption root cause analysis including backend classification, source-node fan-out detection, and cross-run pattern comparison, run:
+   ```
+   /ci:analyze-disruption {job-url}
+   ```
+
+   The `/ci:analyze-disruption` skill provides:
+   - Backend type classification (cache vs non-cache, API vs non-API, cloud canaries)
+   - Source-node pattern detection (single-source fan-out vs multi-source)
+   - Correlation with OVS stalls, CPU pressure, etcd delays, and disk I/O metrics
+   - Multi-run comparison to identify systemic vs intermittent patterns
+
+   > **Note**: Continue reading below for test-level analysis. Disruption analysis complements this report by explaining *why* the cluster experienced connectivity issues.
 
    ---
 
@@ -1390,3 +1506,58 @@ Handle errors in the same way as "Error handling" in "Prow Job Analyze Resource"
 ## Performance Considerations
 
 Follow the instructions in "Performance Considerations" in "Prow Job Analyze Resource" skill
+
+## Related Skills
+
+### `/ci:analyze-disruption` - Complementary Disruption Analysis
+
+When Step 4.3c detects significant disruption (5+ events, API backend disruption, or clear timing correlation), use `/ci:analyze-disruption` for comprehensive disruption-specific root cause analysis.
+
+**What `/ci:analyze-disruption` provides that this skill does not**:
+
+1. **Dedicated disruption parsing** - Specialized `parse_disruption.py` script that:
+   - Classifies backends by type (cache vs non-cache, API vs ingress, cloud canaries)
+   - Detects source-node fan-out patterns (single-source vs multi-source)
+   - Identifies which phase disruption occurred in (upgrade vs conformance)
+   - Assesses network-liveness reliability (clean, minor, degraded, unreliable)
+
+2. **Multi-run comparison** - Analyze patterns across multiple job runs to identify:
+   - Systemic disruption patterns (same backends, same timing)
+   - Intermittent issues (different backends, different runs)
+   - Infrastructure-specific problems (correlates with specific environments)
+
+3. **Disruption-specific correlation** - Automatically correlates disruption with:
+   - OVS vswitchd stalls and poll intervals
+   - CPU pressure on specific nodes
+   - Azure disk IOPS, queue depth, and latency metrics
+   - etcd apply delays, slow fdatasync, WAL fsync duration
+   - Firing Prometheus alerts
+
+4. **Backend filtering** - Focus analysis on specific backends with `--backends` flag
+
+**Typical workflow**:
+
+```
+# Step 1: Analyze test failure (this skill)
+/ci:analyze-prow-job-test-failure <job-url>
+
+# If Step 4.3c detects significant disruption...
+
+# Step 2: Deep-dive into disruption root cause
+/ci:analyze-disruption <job-url>
+
+# For cross-run pattern analysis (especially useful for TRT)
+/ci:analyze-disruption <url1> <url2> <url3> --backends kube-api,openshift-api
+```
+
+**When to use each skill**:
+
+| Use this skill (`analyze-prow-job-test-failure`) | Use `analyze-disruption` |
+|--------------------------------------------------|--------------------------|
+| Test failed with stack trace or error message | 5+ disruption events detected |
+| Need test code analysis | Need backend classification |
+| Need must-gather cluster diagnostics | Need source-node pattern analysis |
+| Single job run deep-dive | Multi-run comparison |
+| General test failure investigation | Disruption-specific root cause |
+
+The two skills are **complementary** — disruption analysis explains *why* connectivity failed, while test failure analysis explains *what* the test was doing and *how* it manifested as a failure.
